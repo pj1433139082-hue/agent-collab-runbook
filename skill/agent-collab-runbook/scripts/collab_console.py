@@ -282,13 +282,25 @@ def worktree_path(card: str, at: datetime | None = None) -> Path:
     return worktree_root() / f"{card}-{stamp_text}"
 
 
+def default_sandbox_root() -> Path:
+    """没显式声明可写根时用的默认值。
+
+    Windows（本项目的生产形态）用约定的工作根；POSIX（CI / Linux 试验）用临时目录 ——
+    那里本来就是可写的，判据「工作树必须落在可写根内」在两边都能成立。"""
+    if os.name == "nt":
+        return Path(r".")
+    return Path(tempfile.gettempdir())
+
+
 def worktree_root() -> Path:
-    return Path(os.environ.get("COLLAB_WORKTREE_ROOT", r"_worktrees"))
+    return Path(os.environ.get("COLLAB_WORKTREE_ROOT", str(default_sandbox_root() / "_worktrees")))
 
 
 def sandbox_roots() -> tuple[Path, ...]:
-    raw = os.environ.get("COLLAB_SANDBOX_ROOTS", r".")
-    return tuple(Path(item) for item in raw.split(os.pathsep) if item.strip())
+    raw = os.environ.get("COLLAB_SANDBOX_ROOTS")
+    if raw:
+        return tuple(Path(item) for item in raw.split(os.pathsep) if item.strip())
+    return (default_sandbox_root(),)
 
 
 def inside_sandbox(path: Path | str) -> bool:
@@ -1049,8 +1061,10 @@ def selftest() -> int:
         check("工作集：反斜杠归一", workset_violations([r"model_lab\cli.py"], ["model_lab"]) == [])
 
         # R18：工作树必须落在沙箱可写根内（2026-10-16 实测事故：落在 %TEMP% 的工作树被沙箱拒绝）
-        check("沙箱：根内是 True", inside_sandbox(Path(r"_worktrees\X9-010101")) is True)
-        check("沙箱：根外是 False", inside_sandbox(Path(r"C:\Users\example\AppData\Local\Temp\wt-X9")) is False)
+        # 判据按平台取默认根，别写死 E:\ —— 否则 Linux/CI 上会假红（2026-10-16 CI 抓到的第一个跨平台缺陷）
+        check("沙箱：根内是 True", inside_sandbox(worktree_root() / "X9-010101") is True)
+        outside_probe = (Path(tempfile.gettempdir()) / "wt-X9") if os.name == "nt" else (Path.home() / "acr-outside-probe")
+        check("沙箱：根外是 False", inside_sandbox(outside_probe) is False)
         check("沙箱：默认工作树落点在根内", inside_sandbox(worktree_path("X9")) is True)
 
         # R9：轮转时的骨架改写（纯函数）
