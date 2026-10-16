@@ -427,12 +427,25 @@ def pending_envelopes(envelopes: list[dict]) -> list[dict]:
     return [item for item in envelopes if item.get("delivery") == DELIVERY_PENDING]
 
 
+ROLE_LABELS = {"W": "常驻工人", "P": "巡检", "A": "主会话", "B": "并行会话"}
+
+
+def role_title(code: object, fallback: str = "看板任务") -> str:
+    """任务标题＝会话名的来源（dsh-cron 补丁按 '[' 开头的标题给目标会话命名）。
+
+    同一角色永远用同一个标题：宿主的命名是「每会话每宿主生命周期只写一次」，
+    标题随卡变会把好名字换成上一张卡的名字。
+    """
+    code = str(code or "").strip().upper() or "?"
+    return f"[{code}] {ROLE_LABELS.get(code, fallback)}"
+
+
 def task_from_envelope(envelope: dict) -> dict:
     """按信封里固化的模板重建任务体（排队时没建任务，投递时才建）。"""
     template = envelope.get("task_template")
     task = dict(template) if isinstance(template, dict) else {}
     task.setdefault("id", envelope.get("knock_id"))
-    task.setdefault("title", f"[敲] {envelope.get('card')}")
+    task.setdefault("title", role_title(envelope.get("owner_code")))
     task.setdefault("schedule", envelope.get("schedule") or "in 1m")
     task.setdefault("targetSessionId", envelope.get("target_session"))
     task.setdefault("overlapPolicy", "skip")
@@ -618,7 +631,7 @@ def cmd_rotate(args) -> int:
     boot = f"rotate_{now().strftime('%H%M%S')}_{random.randint(100, 999)}"
     task = {
         "id": boot,
-        "title": f"[轮转] {args.worker}",
+        "title": role_title(args.worker, "常驻工人"),
         "schedule": "in 1m",
         "prompt": BOOT_PROMPT,
         "cwd": args.cwd,
@@ -751,7 +764,7 @@ def cmd_dispatch(args) -> int:
         brief_extra = (brief_extra + "\n\n" if brief_extra else "") + "\n".join(lines)
     task = {
         "id": knock,
-        "title": f"[敲] {args.card}",
+        "title": role_title(owner_code),
         "schedule": args.schedule,
         "prompt": prompt,
         "targetSessionId": target,
@@ -1578,7 +1591,7 @@ def selftest() -> int:
               "delivery": DELIVERY_PENDING, "queue_deadline": queue_deadline(DEFAULT_QUEUE_TIMEOUT),
               "issued_at": stamp(), "history": {"tokens": 700}, "budget_tokens": 5000,
               "prompt": "跑 X9", "timeout_seconds": 300, "max_retries": 2,
-              "task_template": {"id": "knock_020202_001", "title": "[敲] X9", "schedule": "in 1m",
+              "task_template": {"id": "knock_020202_001", "title": "[W] 常驻工人", "schedule": "in 1m",
                                 "targetSessionId": "cron-exec-w1", "permissionPreset": "workspace-write",
                                 "overlapPolicy": "skip"}}
     check("排队：目标在跑 ⇒ 等", delivery_decision(queued, ["cron-exec-w1"], []) == ("wait", "target_running"),
@@ -1602,6 +1615,12 @@ def selftest() -> int:
           and rebuilt["targetSessionId"] == "cron-exec-w1", str(rebuilt))
     check("排队：老信封没有超时字段 ⇒ 落到默认 900",
           task_from_envelope({"knock_id": "k", "target_session": "s"})["timeoutSeconds"] == DEFAULT_TASK_TIMEOUT)
+    check("命名：角色标题稳定且以 [ 开头（dsh-cron 补丁据此命名会话）",
+          role_title("W") == "[W] 常驻工人" and role_title("p") == "[P] 巡检"
+          and role_title(None) == "[?] 看板任务", role_title("W"))
+    check("命名：老信封没有标题 ⇒ 用角色标题兜底（同角色永远同名）",
+          task_from_envelope({"knock_id": "k", "target_session": "s",
+                              "owner_code": "W"})["title"] == "[W] 常驻工人")
 
     check("通道：补丁在位 ⇒ OK", patch_state("    resumeSessionId: prep.targetSessionId,")["state"] == "OK")
     check("通道：补丁不在 ⇒ 注意", patch_state("    sessionId: prep.targetSessionId,")["state"] == "注意")
