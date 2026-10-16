@@ -339,6 +339,26 @@ Select-String -LiteralPath '<技能源>\skill\agent-collab-runbook\references\ha
   ForEach-Object { "$($_.LineNumber): $($_.Line)" }   # 期望：无输出
 ```
 
+### 8.1 扫描闸门自己也会假绿（2026-10-16 实测，代价 = 一次已推送）
+
+生成公开副本（`<技能源>\tools\export-public.ps1`，白名单 + 占位化 + 导出自检）时，我在推送前又加了一道「遍历**已跟踪文件**重扫」的闸门，它打印 `0 命中 ✓` —— **但四个中文文件名的 ADR 一个都没被读到**：`git ls-files` 默认 `core.quotepath=true`，把非 ASCII 路径输出成 `"docs/adr/0001-\344\270\244..."`（引号 + 八进制转义），`Join-Path` 拼出的路径无效、`ReadAllText` 抛异常，而我的判断**没把异常算作失败**。当时仓库已经推上去了（随后用 `git grep` 复扫才确认内容其实干净）。
+
+两条正确写法，任一即可：
+
+```powershell
+# ①扫【已提交内容】：直接搜 blob，不经过工作区路径，中文路径也不受影响
+git -C '<仓库>' grep -n -I -E '<模式>' HEAD --     # 退出码 1 = 无匹配，不是错误
+
+# ②扫【工作区】：遍历文件系统，而不是 git ls-files
+Get-ChildItem -Recurse -File '<目录>' | Where-Object { $_.FullName -notmatch '\\\.git\\' } |
+  ForEach-Object { Select-String -LiteralPath $_.FullName -Pattern '<模式>' }
+# 非要用 git ls-files 时：git -c core.quotepath=false ls-files（或 -z 后按 \0 切分）
+```
+
+纪律两条：**扫描器的异常必须算失败**（`$ErrorActionPreference='Stop'`，或逐文件 `try/catch` 把异常计入命中数），因为「没报错 = 没命中」正是这类闸门最容易骗人的地方；**闸门只在被绕过时才知道自己漏了**，所以「0 命中」这句话必须能追到具体命令与退出码，否则只能报「未核验」。
+
+另一条同源经验：脱敏替换要覆盖 **JSON/源码里的双反斜杠写法**（`<交接区>`）——`export-public.ps1` 第一次跑就是被自己这条自检拦下的，只替换单反斜杠形式会在 `.py` 的默认值与 `.md` 的示例里漏网。
+
 ## 9. 交接区模板（可直接复制）
 
 ### 9.1 BOARD 卡模板

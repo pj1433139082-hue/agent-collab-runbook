@@ -42,7 +42,7 @@ from pathlib import Path
 sys.dont_write_bytecode = True  # 技能目录里不留 __pycache__（发布审计会把它当"未知文件"）
 
 CHINA_TZ = timezone(timedelta(hours=8))
-DEFAULT_HANDOFF = Path(os.environ.get("COLLAB_HANDOFF") or r"<交接区>")
+DEFAULT_HANDOFF = Path(os.environ.get("COLLAB_HANDOFF") or r"_handoff")
 DEFAULT_BASE = os.environ.get("COLLAB_BASE") or "http://127.0.0.1:19387"
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_PROVIDER = "custom-workbuddy"
@@ -273,7 +273,7 @@ def is_git_repo(path: Path) -> bool:
 
 
 def worktree_path(card: str, at: datetime | None = None) -> Path:
-    """工作树落点：**必须在受限会话的沙箱可写根之内**（默认 `<工作根>\\_worktrees`）。
+    """工作树落点：**必须在受限会话的沙箱可写根之内**（默认 `_worktrees`）。
 
     2026-10-16 实测事故：落在 `%TEMP%` 的工作树，工人 shell 一写就 `Access to the path … is denied`
     （DSH 文件沙箱只放行工作区根），工人转而申请提权 → 无人应答 → 整轮挂到超时。
@@ -283,7 +283,7 @@ def worktree_path(card: str, at: datetime | None = None) -> Path:
 
 
 def worktree_root() -> Path:
-    return Path(os.environ.get("COLLAB_WORKTREE_ROOT", r"<工作根>\_worktrees"))
+    return Path(os.environ.get("COLLAB_WORKTREE_ROOT", r"_worktrees"))
 
 
 def sandbox_roots() -> tuple[Path, ...]:
@@ -1049,7 +1049,7 @@ def selftest() -> int:
         check("工作集：反斜杠归一", workset_violations([r"model_lab\cli.py"], ["model_lab"]) == [])
 
         # R18：工作树必须落在沙箱可写根内（2026-10-16 实测事故：落在 %TEMP% 的工作树被沙箱拒绝）
-        check("沙箱：根内是 True", inside_sandbox(Path(r"<工作根>\_worktrees\X9-010101")) is True)
+        check("沙箱：根内是 True", inside_sandbox(Path(r"_worktrees\X9-010101")) is True)
         check("沙箱：根外是 False", inside_sandbox(Path(r"%USERPROFILE%\AppData\Local\Temp\wt-X9")) is False)
         check("沙箱：默认工作树落点在根内", inside_sandbox(worktree_path("X9")) is True)
 
@@ -1148,7 +1148,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--schedule", default="in 1m", help="异步派活的触发时刻（默认 in 1m）")
     p.add_argument("--cwd", help="任务 cwd（不给 --worktree 时用）")
     p.add_argument("--worktree", help="R18：在这里建一卡一工作树（仓库根路径）")
-    p.add_argument("--worktree-path", help="工作树落点（默认 <工作根>\\_worktrees\\<卡>-<时刻>，必须在沙箱可写根内）")
+    p.add_argument("--worktree-path", help="工作树落点（默认 _worktrees\\<卡>-<时刻>，必须在沙箱可写根内）")
     p.add_argument("--branch", help="工作树分支名（默认 card/<卡>）")
     p.add_argument("--workset", help="工作集（逗号分隔的路径前缀，覆盖卡上的 workset）")
     p.add_argument("--wait", action="store_true", help="同步等它跑完（默认不等）")

@@ -37,7 +37,7 @@ EXIT_PASS, EXIT_FAIL, EXIT_DEGRADED, EXIT_USAGE = 0, 1, 2, 4
 LEDGER_REL = Path("ledger") / "verdicts.jsonl"
 CHINA_TZ = timezone(timedelta(hours=8))
 
-DEFAULT_HANDOFF = Path(os.environ.get("COLLAB_HANDOFF") or r"<交接区>")
+DEFAULT_HANDOFF = Path(os.environ.get("COLLAB_HANDOFF") or r"_handoff")
 
 
 # --------------------------------------------------------------------------- #
@@ -621,7 +621,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="回执复核器（三态：PASS / FAIL / DEGRADED）")
     parser.add_argument("--card", help="卡号，如 W5")
     parser.add_argument("--knock", help="敲门 id，如 <id>")
-    parser.add_argument("--handoff", type=Path, default=DEFAULT_HANDOFF, help="交接区目录（默认 %%COLLAB_HANDOFF%% 或 <交接区>）")
+    parser.add_argument("--handoff", type=Path, default=DEFAULT_HANDOFF, help="交接区目录（默认 %%COLLAB_HANDOFF%% 或 _handoff）")
     parser.add_argument("--board", type=Path, help="看板路径（默认 <handoff>\\BOARD.md）")
     parser.add_argument("--outbox", type=Path, help="回执目录（默认 <handoff>\\outbox）")
     parser.add_argument("--receipt-md", type=Path)

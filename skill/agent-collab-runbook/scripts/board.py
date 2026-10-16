@@ -56,7 +56,7 @@ def resolve_handoff(explicit: str | None) -> Path:
     env = os.environ.get("COLLAB_HANDOFF")
     if env:
         return Path(env).resolve()
-    return Path(r"<交接区>")
+    return Path(r"_handoff")
 
 
 def read_text(path: Path) -> str:
@@ -405,7 +405,7 @@ def cmd_selftest() -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="board.py", description="交接区看板的卡数据源与渲染器（R13）")
-    parser.add_argument("--handoff", help="交接区目录（默认 $COLLAB_HANDOFF 或 <交接区>）")
+    parser.add_argument("--handoff", help="交接区目录（默认 $COLLAB_HANDOFF 或 _handoff）")
     sub = parser.add_subparsers(dest="command", required=True)
     p_migrate = sub.add_parser("migrate", help="BOARD.md → cards/*.yaml + board.skeleton.md")
     p_migrate.add_argument("--force", action="store_true")
