@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "receipt.schema.json",
+  "title": "敲门回执（机器可读部分）v1.0",
+  "description": "与 <knock_id>.receipt.json 对应。人读部分在 <card>-receipt.md，两者必须一致（不一致 = 复核失败）。本文件只描述「本轮」；历史轮次留在 .md 散文里。",
+  "type": "object",
+  "required": ["schema_version", "knock_id", "card", "round", "status", "criteria", "residue"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "knock_id": { "type": "string", "pattern": "^knock_[A-Za-z0-9_]+$" },
+    "card": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$" },
+    "round": { "type": "integer", "minimum": 1 },
+    "session": { "type": "string" },
+    "status": { "enum": ["OK", "FAIL", "BLOCKED"] },
+    "notes": { "type": "string" },
+    "criteria": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "verdict", "evidence"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "integer", "minimum": 1 },
+          "verdict": { "enum": ["pass", "fail", "na"] },
+          "note": { "type": "string" },
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": ["kind"],
+              "additionalProperties": false,
+              "properties": {
+                "kind": { "enum": ["file", "inline", "command", "absent", "note"] },
+                "path": { "type": "string" },
+                "content": { "type": "string" },
+                "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                "size": { "type": "integer", "minimum": 0 },
+                "command": { "type": "string" },
+                "exit_code": { "type": "integer" },
+                "output_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                "result": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "residue": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path"],
+        "additionalProperties": false,
+        "properties": {
+          "path": { "type": "string" },
+          "note": { "type": "string" }
+        }
+      }
+    }
+  }
+}

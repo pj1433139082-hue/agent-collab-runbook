@@ -1,0 +1,4 @@
+interface:
+  display_name: "多会话协作运行手册"
+  short_description: "让多个智能体会话共用一份业务仓库：交接区记账、看板排班、四查验收、授权红线"
+  default_prompt: "使用 $agent-collab-runbook 接管这次多会话协作：先跑 status.ps1 与框架 status/context 恢复事实，再按交接区协议认领一张卡。"
