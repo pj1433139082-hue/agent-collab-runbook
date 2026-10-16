@@ -1050,7 +1050,7 @@ def selftest() -> int:
 
         # R18：工作树必须落在沙箱可写根内（2026-10-16 实测事故：落在 %TEMP% 的工作树被沙箱拒绝）
         check("沙箱：根内是 True", inside_sandbox(Path(r"_worktrees\X9-010101")) is True)
-        check("沙箱：根外是 False", inside_sandbox(Path(r"%USERPROFILE%\AppData\Local\Temp\wt-X9")) is False)
+        check("沙箱：根外是 False", inside_sandbox(Path(r"C:\Users\example\AppData\Local\Temp\wt-X9")) is False)
         check("沙箱：默认工作树落点在根内", inside_sandbox(worktree_path("X9")) is True)
 
         # R9：轮转时的骨架改写（纯函数）
