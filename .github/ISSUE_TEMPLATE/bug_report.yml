@@ -1,0 +1,43 @@
+name: Bug 报告
+description: 脚本报错、判据/回执行为与文档不符、或复核结果看起来不对
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请先跑一次 `python skill/agent-collab-runbook/scripts/verify_receipt.py --selftest`
+        以及出问题那个脚本的 `selftest`，把退出码贴上来——很多问题在这一步就能定位。
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 发生了什么
+      description: 你期望的结果，与实际得到的结果。
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: 复现命令与完整输出
+      description: 贴命令原文与**逐字**输出（含退出码）。不要改写输出。
+      render: console
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: 仓库提交号（`git rev-parse --short HEAD`）与 Python 版本（`python -VV`）
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: 平台
+      options:
+        - Linux
+        - macOS
+        - Windows（含 Git Bash / PowerShell）
+        - 其他
+    validations:
+      required: true

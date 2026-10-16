@@ -1,0 +1,44 @@
+name: Repository checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # 这个 job 名会成为必需状态检查的 context（分支保护里填的就是它）
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 结构核查与通用脱敏扫描
+        run: python .github/scripts/check_public.py --root skill/agent-collab-runbook
+
+      - name: 三个自测（"克隆即可用"的证据）
+        run: |
+          set -euo pipefail
+          echo "::group::collab_console.py selftest"
+          python skill/agent-collab-runbook/scripts/collab_console.py selftest | tail -1
+          echo "::endgroup::"
+          echo "::group::verify_receipt.py --selftest"
+          python skill/agent-collab-runbook/scripts/verify_receipt.py --selftest | tail -1
+          echo "::endgroup::"
+          echo "::group::board.py selftest"
+          python skill/agent-collab-runbook/scripts/board.py --handoff "$RUNNER_TEMP/board-selftest" selftest | tail -1
+          echo "::endgroup::"
+
+      - name: 记录解释器版本
+        run: python -VV

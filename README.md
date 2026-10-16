@@ -31,6 +31,14 @@
 | `scripts/verify_receipt.py` | 只报告不阻断的复核器 |
 | `scripts/collab_runbook.py` | 框架入口转发 + `--sync-check`（技能源 ↔ 安装副本逐文件比对） |
 | `docs/adr/` | 为什么这样设计（两套看板的权威、看板产物化、会话轮转与工作树、落地） |
+| `.github/workflows/checks.yml` | CI 门禁：结构核查 + 三个自测（job 名 `checks`，也就是 `main` 分支保护要求的那个检查） |
+| `.github/scripts/check_public.py` | 结构核查与通用脱敏扫描（本地也能直接跑） |
+| `CONTRIBUTING.md` / `SECURITY.md` / `CODE_OF_CONDUCT.md` | 参与方式、安全问题报告范围、行为准则 |
+
+## 质量门禁
+
+`main` 受分支保护：禁强推、禁删除，并要求 `checks` 这个 CI 检查通过（管理员保留逃生口，单人维护不会被自己锁住）。
+CI 做两件事：结构核查（必需文件齐备、Python 无语法错误、通用脱敏扫描 0 命中）与**在干净检出里跑三个自测**。
 
 ## 三条不变量
 

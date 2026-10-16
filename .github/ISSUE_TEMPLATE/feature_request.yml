@@ -1,0 +1,31 @@
+name: 功能建议
+description: 协议层面的改进、新的检查、或对某个判据的异议
+title: "[feat] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 你想解决的问题
+      description: 描述场景（谁在什么情况下卡住了），而不是先给方案。
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 你建议的做法
+      description: 如果有替代方案，一并写上；说明为什么选它。
+    validations:
+      required: true
+  - type: textarea
+    id: invariants
+    attributes:
+      label: 对三条不变量的影响
+      description: |
+        1. 只有声明哈希/命令的物证才算可证伪的证据
+        2. 复核只报告不阻断，FAIL 而仍判 Done 必须写理由
+        3. 远端写逐次单独授权，工具链里没有自动推送
+
+        这条建议是**变严**还是**变松**？变松需要单独说明为什么值得。
+    validations:
+      required: true

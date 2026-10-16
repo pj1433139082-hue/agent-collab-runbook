@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安全问题（请勿公开开 issue）
+    url: https://github.com/pj1433139082-hue/agent-collab-runbook/security/advisories/new
+    about: 用私密漏洞报告；SECURITY.md 说明了范围与响应时间。
+  - name: 先读运行手册
+    url: https://github.com/pj1433139082-hue/agent-collab-runbook/blob/main/references/handoff-protocol.md
+    about: 交接区协议、回执契约与落地流程都在这里；多数"怎么用"的问题有现成答案。
