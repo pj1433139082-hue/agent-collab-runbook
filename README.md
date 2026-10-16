@@ -45,3 +45,7 @@ python scripts/collab_console.py selftest   # 26/26
 python scripts/board.py --handoff <交接区> selftest
 python scripts/verify_receipt.py --selftest
 ```
+
+## 许可证
+
+MIT，全文见 [LICENSE](LICENSE)。
