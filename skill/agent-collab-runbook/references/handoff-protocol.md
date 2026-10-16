@@ -299,6 +299,24 @@ git -C <仓库> worktree add -b card/<卡号> %TEMP%\wt-<卡号>-<HHMMSS> <基�
 
 实测（2026-10-16，一次性仓库 + 卡 X3）：`land_plan` 判 `ff` → 主检出 `b10b820` 快进到 `6129269`、`note.md` 到位；再跑一次 = `noop`（幂等）；`--delete-branch` 在分支仍被工作树占着时报 `cannot delete branch … used by worktree` 并**拒绝假装成功**，`git worktree remove` 之后同一条命令 `-d` 删成功。自测 10 项（ff / noop / 四条拒绝线 / 摘取 / 幂等 / 删除被拒 / 删除成功）随 `collab_console.py selftest` 跑，25/25 通过。
 
+## 7.10 排队、通道健康、换绑与一键停机（2026-10-16 R52 补写）
+
+**排队＝信封已写、任务未投**（不新增存储、不建队列服务）。`dispatch --when-idle` 在目标会话正在跑时不报错，把信封标成 `delivery: pending` 并写 `queued_at`/`queue_deadline`；`collect`（以及任何动词开头）会先尝试投递：目标空闲 ⇒ 建任务并写 `delivered_at`；目标被归档或超过 `queue_deadline`（默认 4 小时）⇒ 改成 `abandoned` 并在信封写明原因，`status` 与巡检报红。老信封没有 `delivery` 字段＝当时是同步投的，视为已投。
+
+**任务体止损**：任务体带 `timeoutSeconds`（`dispatch --timeout`，默认 900）与 `maxRetries`（默认 0）。宿主语义是到点中止这一轮并释放会话——**这是本体系唯一的「停止」手段**（看板的卡没有停止按钮，已经投出去的活停不下来）。
+
+**通道健康三判据**（`status` 的「通道健康（R52-4）」节，逐条 `[OK]`/`[注意]`/`[未知]`）：
+
+1. `patch`：`dsh-cron` 的 `lib/runner.js` 里唤醒用的键名仍是宿主契约要求的 `resumeSessionId`。插件升级会覆盖这个补丁；重打办法见 `_handoff/README.md`，巡检只报不打。
+2. `bindings`：worker 表里每个非 A 代号都在会话名册里且未被归档。**名册＝工作区注册表 ∪ `~/.dsh/sessions/<编码后的 cwd>/<会话 id>`**——调度器铸出来的会话不一定写进注册表，只认注册表会把健康登记误报成「不在会话名册里」（2026-10-16 实测踩到并修）。
+3. `board`：`board.py render --check` 通过（有人手改 `BOARD.md` 就报红）。
+
+读不到就报「未知」——**未知不是正常**。
+
+**换绑（`bind`）**：只接受「名册里存在 + 未归档」的会话；写 `board.skeleton.md` → 重渲染 → 记一条 `ledger/rotations.jsonl`；重渲染失败即回滚骨架。`workers` 列出候选（名册 ∩ 未归档）与当前登记。日常换人也可以用 `rotate <代号>`（§7.7）。
+
+**一键停机（`stop-all`）**：只删控制台铸的任务（id 前缀 `knock_`/`rotate_`/`probe_`/`worker_boot`/`palimpsest_probe`），保留巡检等常设排期（`--keep` 可加前缀）；输出在跑会话与剩余排期，并明说**不会中断已经启动的那一轮**。
+
 ## 8. 敏感内容禁写清单
 
 交接区**不在 Git 里**，但会被双方读进上下文（`<交接区>\README.md:28`）——清单的作用是「别把它读进模型上下文、别在发布物里复现」，不是行政密级。

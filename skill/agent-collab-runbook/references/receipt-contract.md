@@ -32,10 +32,19 @@
   "card_owner": "W（常驻 worker 会话 `...`）",
   "provider": "custom-workbuddy", "model": "cn:deepseek-v4.1-flash",
   "task_kept": true,
-  "history": { "status": "success", "sessionId": "...", "durationMs": 200000, "error": null }
+  "history": { "status": "success", "sessionId": "...", "durationMs": 200000, "error": null },
+
+  "timeout_seconds": 900, "max_retries": 0, "budget_tokens": 1500000,
+  "delivery": "delivered", "queued_at": null, "queue_deadline": null,
+  "delivered_at": "<时间>",
+  "prompt": "<投递用的完整提示词（排队后重建任务体要用）>",
+  "task_template": { "schedule": "in 1m", "type": "llm", "cwd": "...",
+                     "permissionPreset": "workspace-write", "provider": "custom-workbuddy",
+                     "model": "cn:deepseek-v4.1-flash", "overlapPolicy": "skip" }
 }
 ```
 
+- **R52 新增字段（2026-10-16）**：`delivery` 三态 `pending`/`delivered`/`abandoned`；`pending` 表示「信封已写、任务未投」（排队，见 §7.10），**老信封没有该字段＝当时同步投递，按已投处理**；`queued_at`/`queue_deadline` 只在排队时出现（`queue_deadline` 默认 4 小时）；`delivered_at` 是投递成功的机器时间；`timeout_seconds`/`max_retries` 进任务体（`timeoutSeconds`/`maxRetries`），**超时到点中止是唯一的止损手段**；`budget_tokens` 只进账（`budget` 按卡汇总）不进任务体；`prompt`/`task_template` 让 `collect` 能原样重建任务体，不必回头读卡。
 - 判据哈希由 `verify_receipt.py --card <卡> --print-card-facts` 计算（**与复核器同源**：CRLF→LF、逐行去尾空白、首尾去空白），敲门器不自己实现第二套归一化。
 - **cron 任务保留到复核完成**（`task_kept: true`）。任务本身就是 execution fact 的取证窗口；复核后收口：`knock.ps1 -Card <卡> -DeleteTask -TaskId <knock_id>`。
 - 负责人绑定：卡上「负责人」代号必须与目标会话在 `BOARD.md` 常驻 worker 表里的代号一致，否则拒投（`-Force` 可越权，但会在日志里留痕）。

@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
 """collab_console.py — 协作控制台（决策 R7 / R8 / R9 / R10）。
 
-七个动词，全部只走公开接口（dsh-cron HTTP API + 交接区文件），不碰宿主内部状态：
+动词一律只走公开接口（dsh-cron HTTP API + 交接区文件），不碰宿主内部状态：
 
     dispatch   把一张卡敲给它的负责人会话（默认**异步**：1 分钟后由插件自己触发，投递即返回）
-    collect    刷新并列出所有敲门的执行事实（任务状态/耗时/token），可选顺手复核
+               `--when-idle`：目标在跑时只写信封（delivery=pending），等 collect 择机投递
+    collect    刷新并列出所有敲门的执行事实（任务状态/耗时/token）；顺带投递排队信封，可选复核
     verify     跑独立复核（薄封装 verify_receipt.py，结论自动记账到 ledger/verdicts.jsonl）
     close      复核完成后收口：删 cron 任务 + 在信封上记 closed_at（可选把卡搬进 Done）
-    status     一屏：谁在跑、哪些卡在等、今天的敲门花了多少
+    status     一屏：谁在跑、哪些卡在等、排队与通道健康、今天的敲门花了多少
     budget     预算闸：把今天的 token/成本与上限比，超限 exit 3（派活前先跑它）
     lease      占用声明：派活前先占 `<card>.lease.json`，防止 A/B 同派一张卡
+    rotate     R9：换掉某个常驻工人的会话（只换身份，不换职责）
+    land       R18：把卡分支落回主检出（ff / cherry-pick / 幂等 noop，**绝不推送**）
+    workers    R52-2：列出候选会话（名册 ∩ 未归档）与当前登记
+    bind       R52-2：登记/换绑某代号的工人会话（写骨架 + 重渲染 + 记轮换账）
+    stop-all   R52-3：删掉非人类定时任务并打印在跑会话与剩余排期（**不中断**已启动的那一轮）
 
 设计要点（都有实测依据）：
   · **异步投递用 `schedule: in 1m`，不用同步 run**——同步 `POST /tasks/<id>/run` 一旦客户端断开，
@@ -51,6 +57,17 @@ RECEIPT_HINT = ("回执按两件套交：`outbox/<card>-receipt.md`（人读，�
                 "`STATUS: OK|FAIL|BLOCKED`）与 `outbox/<knock_id>.receipt.json`（机器读，"
                 "schema 见技能 `references/receipt.schema.json`）。")
 
+# R52-1：超时与排队（不新增存储——排队就是"信封在、任务未投"这一状态本身）
+DEFAULT_TASK_TIMEOUT = 900            # 任务体 timeoutSeconds：到点中止，这是唯一的"停止"手段
+DEFAULT_QUEUE_TIMEOUT = 4 * 3600      # --when-idle 的排队超期上限（秒）
+DELIVERY_PENDING = "pending"
+DELIVERY_DELIVERED = "delivered"
+DELIVERY_ABANDONED = "abandoned"
+# 控制台自己铸的任务 id 前缀；stop-all 只删这些，人类在看板上建的排期一律不碰
+AGENT_TASK_PREFIXES = ("knock_", "rotate_", "probe_", "worker_boot", "palimpsest_probe")
+KEEP_BY_DEFAULT = ("patrol",)         # 巡检是常设排期：停下它等于关掉看门狗，所以默认保留
+CRON_PLUGIN_PACKAGE = "@goodandready/dsh-cron"
+
 
 def now() -> datetime:
     return datetime.now(CHINA_TZ)
@@ -91,20 +108,145 @@ def api(base: str, method: str, path: str, body: dict | None = None, timeout: fl
     return payload if isinstance(payload, dict) else {"data": payload}
 
 
-def archived_sessions() -> list[str]:
+def workspace_state() -> dict:
+    """宿主的工作区注册表（`~/.dsh/storages/workspace.json`）：名册与归档名单的唯一来源。"""
     path = Path(os.environ.get("USERPROFILE", str(Path.home()))) / ".dsh" / "storages" / "workspace.json"
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return []
-    ids = data.get("global", {}).get("archivedSessionIds", [])
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def archived_sessions() -> list[str]:
+    ids = workspace_state().get("global", {}).get("archivedSessionIds", [])
     return [item for item in ids if isinstance(item, str)]
+
+
+def session_store_ids(root: Path | None = None) -> list[str]:
+    """会话存贮里的会话 id（`~/.dsh/sessions/<cwd 桶>/<id>`，含每日重置变体的基名）。
+
+    调度器铸出来的会话（`cron-exec-*`）不一定写进工作区注册表，只在存贮里留目录；
+    只认注册表会把健康登记误报成「不在名册里」，所以名册取两者的并集。root 可注入便于自测。
+    """
+    root = root or Path(os.environ.get("USERPROFILE", str(Path.home()))) / ".dsh" / "sessions"
+    ids: list[str] = []
+    try:
+        buckets = [item for item in root.iterdir() if item.is_dir()]
+    except OSError:
+        return ids
+    for bucket in buckets:
+        try:
+            names = [item.name for item in bucket.iterdir() if item.is_dir()]
+        except OSError:
+            continue
+        for name in names:
+            ids.append(name)
+            base = re.sub(r"-\d{4}-\d{2}-\d{2}$", "", name)
+            if base != name:
+                ids.append(base)
+    return sorted(set(ids))
+
+
+def session_roster() -> list[str]:
+    """会话名册：注册表 ∪ 会话存贮（含归档；调用方自行过滤）。"""
+    tables = workspace_state().get("tables", {}).get("workspaces", {})
+    ids: list[str] = []
+    if isinstance(tables, dict):
+        for record in tables.values():
+            if not isinstance(record, dict):
+                continue
+            for item in record.get("sessionIds", []) or []:
+                if isinstance(item, str):
+                    ids.append(item)
+            for item in record.get("pinnedSessionIds", []) or []:
+                if isinstance(item, str):
+                    ids.append(item)
+    ids.extend(session_store_ids())
+    return sorted(set(ids))
 
 
 def running_agents(base: str) -> list[str]:
     status = api(base, "GET", "/dsh-market/status", timeout=10.0)
     agents = status.get("runningAgents") or status.get("status", {}).get("runningAgents") or []
     return [item for item in agents if isinstance(item, str)]
+
+
+def plugin_runner_path(profile: str | None = None) -> Path | None:
+    """dsh-cron 的 runner.js —— 唤醒通道就活在它那一行本地补丁上。"""
+    home = Path(os.environ.get("USERPROFILE", str(Path.home())))
+    name = profile or os.environ.get("DSH_PROFILE") or "desktop"
+    candidate = Path(os.environ.get("DSH_PROFILE_DIR") or (home / ".dsh" / "profiles" / name)) \
+        / "node_modules" / "@goodandready" / "dsh-cron" / "lib" / "runner.js"
+    return candidate if candidate.is_file() else None
+
+
+def board_render_check(handoff: Path) -> tuple[int, str]:
+    """看板一致性：交给 board.py 的 `render --check`，不在控制台里重写这条判据。"""
+    try:
+        proc = subprocess.run([sys.executable, str(SCRIPT_DIR / "board.py"), "--handoff", str(handoff),
+                               "render", "--check"], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as error:  # pragma: no cover - 环境异常
+        return 2, f"{type(error).__name__}: {error}"
+    return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+
+
+def patch_state(text: str, path: Path | None = None) -> dict:
+    """唤醒补丁的三态判定（纯函数，便于自测）：补丁活在 dsh-cron 的 runner.js 那一行上。"""
+    patched = "resumeSessionId: prep.targetSessionId" in text
+    stale = re.search(r"(?<!resume)sessionId:\s*prep\.targetSessionId", text) is not None
+    where = f"：{path}" if path else ""
+    if patched and not stale:
+        return {"id": "patch", "state": "OK", "detail": f"唤醒补丁在位（resumeSessionId 契约）{where}"}
+    if patched and stale:
+        return {"id": "patch", "state": "注意", "detail": "新旧键名同时出现，可能重复投递"}
+    return {"id": "patch", "state": "注意", "detail": f"唤醒补丁不在（插件升级会覆盖）{where}"}
+
+
+def binding_problems(workers: dict[str, str], roster: list[str], archived: list[str]) -> list[str]:
+    """登记健康：每个非 A 代号必须在名册里且未归档。纯函数。"""
+    problems: list[str] = []
+    for code, session in sorted(workers.items()):
+        if code == "A":
+            continue  # 主会话由业主开，不在名册里也可能是正常的
+        if session in archived:
+            problems.append(f"{code} 已被归档")
+        elif session not in roster:
+            problems.append(f"{code} 不在会话名册里")
+    return problems
+
+
+def channel_health(handoff: Path, base: str, board_text: str, running: list[str] | None = None) -> list[dict]:
+    """R52-4 通道自检三条判据（三态 OK / 注意 / 未知，未知优先）。全程只读。"""
+    running = running_agents(base) if running is None else running
+    archived = archived_sessions()
+    results: list[dict] = []
+
+    path = plugin_runner_path()
+    if path is None:
+        results.append({"id": "patch", "state": "未知",
+                        "detail": "找不到 dsh-cron 的 runner.js（插件未装，或 profile 不是当前 profile）"})
+    else:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as error:
+            results.append({"id": "patch", "state": "未知", "detail": f"读不到 {path}：{error}"})
+        else:
+            results.append(patch_state(text, path))
+
+    workers = worker_table(board_text)
+    if not workers:
+        results.append({"id": "bindings", "state": "未知", "detail": "看板里没有常驻 worker 表"})
+    else:
+        problems = binding_problems(workers, session_roster(), archived)
+        results.append({"id": "bindings", "state": "注意" if problems else "OK",
+                        "detail": "；".join(problems) if problems
+                        else f"{len(workers) - 1} 个登记会话都在名册且未归档"})
+
+    code, text = board_render_check(handoff)
+    results.append({"id": "board", "state": "OK" if code == 0 else "注意",
+                    "detail": "看板与卡数据源逐字一致" if code == 0 else f"render --check 失败：{text.strip()[:200]}"})
+    return results
 
 
 def read_board(handoff: Path) -> str:
@@ -252,6 +394,99 @@ def read_lease(handoff: Path, card: str) -> dict | None:
         return json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return None
+
+
+# --------------------------------------------------------------------------- #
+# R52-1：排队语义（排队＝"信封已写、任务未投"这一状态本身，不新增存储）
+# --------------------------------------------------------------------------- #
+def delivery_decision(envelope: dict, running: list[str], archived: list[str],
+                      at: datetime | None = None) -> tuple[str, str]:
+    """排队信封的下一步：(动作, 原因)，动作 ∈ wait / deliver / abandon。纯函数，便于自测。"""
+    target = str(envelope.get("target_session") or "")
+    if target in archived:
+        return "abandon", "archived_target"
+    moment = at or now()
+    deadline = envelope.get("queue_deadline")
+    if isinstance(deadline, str) and deadline:
+        try:
+            if moment >= datetime.fromisoformat(deadline):
+                return "abandon", "queue_timeout"
+        except ValueError:
+            pass
+    if target in running:
+        return "wait", "target_running"
+    return "deliver", "target_idle"
+
+
+def queue_deadline(seconds: int, at: datetime | None = None) -> str:
+    return ((at or now()) + timedelta(seconds=max(0, int(seconds)))).isoformat(timespec="seconds")
+
+
+def pending_envelopes(envelopes: list[dict]) -> list[dict]:
+    """仍在排队的信封（delivery=pending）；老信封没有这个字段＝当时就已投递。"""
+    return [item for item in envelopes if item.get("delivery") == DELIVERY_PENDING]
+
+
+def task_from_envelope(envelope: dict) -> dict:
+    """按信封里固化的模板重建任务体（排队时没建任务，投递时才建）。"""
+    template = envelope.get("task_template")
+    task = dict(template) if isinstance(template, dict) else {}
+    task.setdefault("id", envelope.get("knock_id"))
+    task.setdefault("title", f"[敲] {envelope.get('card')}")
+    task.setdefault("schedule", envelope.get("schedule") or "in 1m")
+    task.setdefault("targetSessionId", envelope.get("target_session"))
+    task.setdefault("overlapPolicy", "skip")
+    task["timeoutSeconds"] = int(envelope.get("timeout_seconds") or DEFAULT_TASK_TIMEOUT)
+    task["maxRetries"] = int(envelope.get("max_retries") or 0)
+    prompt = envelope.get("prompt")
+    if isinstance(prompt, str) and prompt:
+        task["prompt"] = prompt
+    return task
+
+
+def deliver_pending(handoff: Path, base: str, *, dry_run: bool = False,
+                    running: list[str] | None = None) -> list[dict]:
+    """把排队中的信封择机投出去：目标空闲就投，归档/超期就放弃并留痕。"""
+    running = running_agents(base) if running is None else running
+    archived = archived_sessions()
+    listing = api(base, "GET", "/dsh-cron/tasks", timeout=20.0)
+    tasks_raw = listing.get("tasks")
+    existing = {item.get("id") for item in tasks_raw if isinstance(item, dict)} if isinstance(tasks_raw, list) else set()
+    results: list[dict] = []
+    for envelope in pending_envelopes(all_envelopes(handoff)):
+        knock = str(envelope.get("knock_id") or "")
+        if knock in existing:  # 任务其实已建（上次投递后没写回）：只补状态，不重复建
+            envelope["delivery"] = DELIVERY_DELIVERED
+            envelope["delivered_at"] = envelope.get("delivered_at") or stamp()
+            if not dry_run:
+                write_envelope(handoff, envelope)
+            results.append({"knock": knock, "action": "deliver", "reason": "task_present"})
+            continue
+        action, reason = delivery_decision(envelope, running, archived)
+        if action == "wait":
+            results.append({"knock": knock, "action": "wait", "reason": reason})
+            continue
+        if action == "abandon":
+            envelope["delivery"] = DELIVERY_ABANDONED
+            envelope["abandoned_at"] = stamp()
+            envelope["abandon_reason"] = reason
+            if not dry_run:
+                write_envelope(handoff, envelope)
+            results.append({"knock": knock, "action": "abandon", "reason": reason})
+            continue
+        if dry_run:
+            results.append({"knock": knock, "action": "deliver", "reason": reason})
+            continue
+        created = api(base, "POST", "/dsh-cron/tasks", task_from_envelope(envelope), timeout=60.0)
+        if created.get("http_status") not in (200, 201) and not created.get("ok"):
+            results.append({"knock": knock, "action": "error",
+                            "reason": json.dumps(created, ensure_ascii=False)[:200]})
+            continue
+        envelope["delivery"] = DELIVERY_DELIVERED
+        envelope["delivered_at"] = stamp()
+        write_envelope(handoff, envelope)
+        results.append({"knock": knock, "action": "deliver", "reason": reason})
+    return results
 
 
 # --------------------------------------------------------------------------- #
@@ -449,8 +684,14 @@ def cmd_dispatch(args) -> int:
         return fail("archived_target", f"目标会话在 global.archivedSessionIds 里（共 {len(archived)} 条）——"
                                        f"投进去必被宿主闸门拒（收下即 blocked、零 token）。")
     running = running_agents(args.base)
+    queued = False
     if target in running and not args.force:
-        return fail("running_target", f"目标会话正在运行（{len(running)} 个）：{target}（-Force 才硬试）。")
+        if not args.when_idle:
+            return fail("running_target", f"目标会话正在运行（{len(running)} 个）：{target}"
+                                          f"（要排队加 --when-idle，要硬试加 --force）。")
+        queued = True
+    if queued and args.wait:
+        return fail("bad_usage", "--when-idle 是异步排队，不能和 --wait 一起用。")
     lease = read_lease(handoff, args.card)
     if lease and not args.force:
         return fail("leased", f"卡 {args.card} 已被占用：{lease.get('by')} @ {lease.get('at')}（-Force 才抢占）。")
@@ -518,6 +759,8 @@ def cmd_dispatch(args) -> int:
         "model": args.model,
         "permissionPreset": args.permission,
         "overlapPolicy": "skip",
+        "timeoutSeconds": int(args.timeout),
+        "maxRetries": int(args.max_retries),
     }
     if worktree_info:
         task["cwd"] = worktree_info["path"]
@@ -526,12 +769,20 @@ def cmd_dispatch(args) -> int:
     if args.dry_run:
         out(json.dumps({"dry_run": True, "task": task, "owner_code": owner_code,
                         "criteria_sha256": facts.get("criteria_sha256"),
-                        "workset": workset, "worktree": worktree_info}, ensure_ascii=False, indent=2))
+                        "workset": workset, "worktree": worktree_info,
+                        "delivery": DELIVERY_PENDING if queued else DELIVERY_DELIVERED,
+                        "timeout_seconds": int(args.timeout), "max_retries": int(args.max_retries),
+                        "budget_tokens": args.budget_tokens,
+                        "queue_deadline": queue_deadline(args.queue_timeout) if queued else None},
+                       ensure_ascii=False, indent=2))
         return 0
-    created = api(args.base, "POST", "/dsh-cron/tasks", task, timeout=60.0)
-    if created.get("http_status") not in (200, 201) and not created.get("ok"):
-        return fail("task_create_failed", json.dumps(created, ensure_ascii=False)[:400])
     brief = write_brief(handoff, knock, args.card, facts, board_text, brief_extra)
+    if queued:
+        out(f"排队中（目标在跑，未建任务）：{knock} → {target}")
+    else:
+        created = api(args.base, "POST", "/dsh-cron/tasks", task, timeout=60.0)
+        if created.get("http_status") not in (200, 201) and not created.get("ok"):
+            return fail("task_create_failed", json.dumps(created, ensure_ascii=False)[:400])
     envelope = {
         "knock_id": knock,
         "card": args.card,
@@ -549,13 +800,28 @@ def cmd_dispatch(args) -> int:
         "worktree": worktree_info,
         "task_kept": True,
         "history": None,
+        "timeout_seconds": int(args.timeout),
+        "max_retries": int(args.max_retries),
+        "budget_tokens": args.budget_tokens,
+        "delivery": DELIVERY_PENDING if queued else DELIVERY_DELIVERED,
+        "queued_at": stamp() if queued else None,
+        "queue_deadline": queue_deadline(args.queue_timeout) if queued else None,
+        "delivered_at": None if queued else stamp(),
+        "prompt": prompt,
+        "task_template": {k: v for k, v in task.items() if k != "prompt"},
     }
     path = write_envelope(handoff, envelope)
-    out(f"已投递：{knock} → {target}（卡 {args.card}，负责人 {owner_code}）")
+    if not queued:
+        out(f"已投递：{knock} → {target}（卡 {args.card}，负责人 {owner_code}）")
     out(f"  信封 {path}")
     out(f"  brief {brief}")
+    out(f"  超时 {int(args.timeout)}s（到点中止，这是唯一的停止手段）；重试 {int(args.max_retries)}")
+    if queued:
+        out(f"  排队超期：{envelope['queue_deadline']}；`collect` 会在目标空闲时投递，超期则记 abandoned。")
+        out(f"  复核前置：`collect --knock {knock}` 看投递结果；`verify`/`close` 在拿到回执后再跑。")
+        return 0
     if args.wait:
-        result = api(args.base, "POST", f"/dsh-cron/tasks/{knock}/run", timeout=args.timeout)
+        result = api(args.base, "POST", f"/dsh-cron/tasks/{knock}/run", timeout=float(args.timeout) + 60.0)
         envelope["history"] = {k: result.get(k) for k in ("ok", "status", "durationMs", "error") if k in result} or result
         write_envelope(handoff, envelope)
         out(f"  同步执行：{json.dumps(envelope['history'], ensure_ascii=False)[:300]}")
@@ -567,6 +833,11 @@ def cmd_dispatch(args) -> int:
 
 def cmd_collect(args) -> int:
     handoff = Path(args.handoff)
+    if not args.no_deliver:
+        for item in deliver_pending(handoff, args.base):
+            if item["action"] == "wait":
+                continue
+            out(f"排队信封 {item['knock']}：{item['action']}（{item['reason']}）")
     envelopes = all_envelopes(handoff)
     if args.knock:
         envelopes = [item for item in envelopes if item.get("knock_id") == args.knock]
@@ -605,11 +876,12 @@ def cmd_collect(args) -> int:
             "ms": (envelope.get("history") or {}).get("lastDurationMs") or "-",
             "tokens": (envelope.get("history") or {}).get("tokens") or "-",
             "receipt": state, "closed": envelope.get("closed_at"),
+            "delivery": envelope.get("delivery") or DELIVERY_DELIVERED,
         })
-    out(f"{'knock':<22}{'卡':<5}{'任务状态':<9}{'耗时ms':<9}{'tokens':<10}{'回执':<8}closed")
+    out(f"{'knock':<22}{'卡':<5}{'投递':<11}{'任务状态':<9}{'耗时ms':<9}{'tokens':<10}{'回执':<8}closed")
     for row in rows:
-        out(f"{row['knock']:<22}{str(row['card']):<5}{str(row['status']):<9}{str(row['ms']):<9}"
-            f"{str(row['tokens']):<10}{row['receipt']:<8}{row['closed'] or ''}")
+        out(f"{row['knock']:<22}{str(row['card']):<5}{str(row['delivery']):<11}{str(row['status']):<9}"
+            f"{str(row['ms']):<9}{str(row['tokens']):<10}{row['receipt']:<8}{row['closed'] or ''}")
     if args.verify:
         verifier = load_verifier()
         for row in rows:
@@ -906,6 +1178,122 @@ def cmd_land(args) -> int:
     return 0
 
 
+def board_render(handoff: Path) -> tuple[int, str]:
+    """重渲染看板（写 BOARD.md）——唯一权威仍是 board.py。"""
+    try:
+        proc = subprocess.run([sys.executable, str(SCRIPT_DIR / "board.py"), "--handoff", str(handoff), "render"],
+                              capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as error:  # pragma: no cover - 环境异常
+        return 2, f"{type(error).__name__}: {error}"
+    return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+
+
+# --------------------------------------------------------------------------- #
+# R52-2 / R52-3：工人登记与停机
+# --------------------------------------------------------------------------- #
+def cmd_workers(args) -> int:
+    handoff = Path(args.handoff)
+    workers = worker_table(read_board(handoff))
+    archived = set(archived_sessions())
+    roster = session_roster()
+    out(f"当前登记（{len(workers)}）：")
+    for code, session in sorted(workers.items()):
+        mark = "已归档" if session in archived else ("在名册" if session in roster else "不在名册")
+        out(f"  {code:<4}{session:<54}{mark}")
+    candidates = [item for item in roster if item not in archived]
+    free = [item for item in candidates if item not in set(workers.values())]
+    out(f"候选（名册 ∩ 未归档 ∩ 未登记）：{len(free)}")
+    for item in free[: max(0, int(args.limit))]:
+        out(f"  {item}")
+    out("换绑：`bind <代号> --session <id>`（写骨架 + 重渲染 + 记轮换账）")
+    return 0
+
+
+def bind_worker(handoff: Path, code: str, session: str, *, by: str = "A", reason: str | None = None,
+                apply: bool = True, roster: list[str] | None = None,
+                archived: list[str] | None = None) -> tuple[int, str]:
+    """把某代号的会话换掉：写骨架 + 重渲染 + 记轮换账。失败即回滚骨架。
+
+    roster / archived 可注入，便于自测脱网跑（默认读真实名册与归档名单）。
+    """
+    skeleton = handoff / "board.skeleton.md"
+    try:
+        text = skeleton.read_text(encoding="utf-8")
+    except OSError as error:
+        return 2, f"读不到骨架 {skeleton}：{error}"
+    workers = worker_table(text) or worker_table(read_board(handoff))
+    old = workers.get(code)
+    if not old:
+        return 2, f"骨架的 worker 表里没有代号 {code}"
+    if old == session:
+        return 2, f"{code} 已经绑在 {session} 上"
+    known = session_roster() if roster is None else roster
+    gone = archived_sessions() if archived is None else archived
+    if session not in known:
+        return 2, f"会话 {session} 不在名册里（没有在任何工作区登记过）"
+    if session in gone:
+        return 2, f"会话 {session} 已被归档，投进去只会变成 blocked"
+    if not apply:
+        return 0, f"干跑：{code} {old} → {session}"
+    rewritten = rewrite_worker_session(text, old, session)
+    if rewritten == text:
+        return 2, f"骨架里找不到 {old} 的登记行（skeleton_stale：先核对看板 worker 表）"
+    skeleton.write_text(rewritten, encoding="utf-8", newline="\n")
+    code_exit, message = board_render(handoff)
+    if code_exit != 0:
+        skeleton.write_text(text, encoding="utf-8", newline="\n")  # 回滚，不留半改状态
+        return 2, f"重渲染失败，骨架已回滚：{message.strip()[:200]}"
+    append_rotation(handoff, {"at": stamp(), "worker": code, "old_session": old, "new_session": session,
+                              "boot_task": None, "by": by, "reason": reason or "bind 换绑", "render_exit": code_exit})
+    return 0, f"已换绑：{code} {old} → {session}（看板已重渲染，轮换账已记）"
+
+
+def cmd_bind(args) -> int:
+    handoff = Path(args.handoff)
+    code_exit, message = bind_worker(handoff, args.worker, args.session, by=args.by, reason=args.reason,
+                                     apply=not args.dry_run)
+    out(message)
+    return code_exit
+
+
+def stopper_selection(tasks: list[dict], keep: tuple[str, ...] = KEEP_BY_DEFAULT) -> tuple[list[dict], list[dict]]:
+    """停机清单：只挑控制台铸的任务（按 id 前缀），保留业主排期与 keep 前缀。纯函数。"""
+    doomed: list[dict] = []
+    kept: list[dict] = []
+    for task in tasks:
+        ident = str(task.get("id") or "")
+        if ident.startswith(AGENT_TASK_PREFIXES) and not ident.startswith(keep):
+            doomed.append(task)
+        else:
+            kept.append(task)
+    return doomed, kept
+
+
+def cmd_stop_all(args) -> int:
+    handoff = Path(args.handoff)
+    listing = api(args.base, "GET", "/dsh-cron/tasks", timeout=20.0)
+    tasks_raw = listing.get("tasks")
+    tasks = [item for item in tasks_raw if isinstance(item, dict)] if isinstance(tasks_raw, list) else []
+    keep = tuple(item.strip() for item in (args.keep or "").split(",") if item.strip()) or KEEP_BY_DEFAULT
+    doomed, kept = stopper_selection(tasks, keep)
+    out(f"定时任务共 {len(tasks)}：将删 {len(doomed)}、保留 {len(kept)}（保留前缀：{', '.join(keep)}）")
+    for task in doomed:
+        ident = str(task.get("id") or "")
+        if args.dry_run:
+            out(f"  待删 {ident}  {task.get('title')}")
+            continue
+        result = api(args.base, "DELETE", f"/dsh-cron/tasks/{ident}", timeout=20.0)
+        ok = result.get("http_status") in (200, 204) or bool(result.get("ok"))
+        out(f"  {'已删' if ok else '删除失败'} {ident}  {task.get('title')}")
+    for task in kept:
+        out(f"  保留 {task.get('id')}  {task.get('schedule')}  {str(task.get('title'))[:40]}")
+    running = running_agents(args.base)
+    out(f"在跑的会话（{len(running)}）：" + (", ".join(running) or "无"))
+    out("注意：宿主没有中断能力——**已经开始的那一轮不会被这条命令停掉**，只能等它自己跑完"
+        "（或撞上任务体的 timeoutSeconds 到点中止）。")
+    return 0
+
+
 def awaiting_receipts(handoff: Path, envelopes: list[dict]) -> list[dict]:
     """还在等回执的敲门：没交回执，也没被收口（收口过的信封带 closed_at）。"""
     waiting = []
@@ -940,7 +1328,17 @@ def cmd_status(args) -> int:
         out(f"  {task.get('id'):<24}{task.get('schedule', ''):<18}last={task.get('lastStatus', '-')}"
             f"  {str(task.get('title'))[:40]}")
     out(f"看板卡：{', '.join(f'{k}={v}' for k, v in sorted(counts.items()))}")
+    queued = pending_envelopes(envelopes)
+    out(f"排队中（{len(queued)}）：" + (", ".join(f"{item.get('knock_id')}→{item.get('target_session')}"
+                                                 for item in queued) or "无"))
     out(f"等回执的敲门（{len(pending)}）：" + (", ".join(item.get("knock_id", "") for item in pending) or "无"))
+    try:
+        board_text = read_board(handoff)
+    except OSError:
+        board_text = ""
+    out("通道健康（R52-4）：")
+    for item in channel_health(handoff, args.base, board_text, running=running):
+        out(f"  [{item['state']}] {item['id']}：{item['detail']}")
     ledger = handoff / "ledger" / "verdicts.jsonl"
     if ledger.is_file():
         lines = [line for line in ledger.read_text(encoding="utf-8", errors="replace").splitlines() if line.strip()]
@@ -971,16 +1369,42 @@ def today_tokens(handoff: Path) -> dict:
     return {"day": day, "tokens": total, "knocks": knocks}
 
 
+def card_tokens(handoff: Path) -> list[dict]:
+    """按卡汇总今日消耗（R52：budget 的按卡视图）。纯读取，缺 tokens 的信封跳过。"""
+    day = now().strftime("%Y-%m-%d")
+    totals: dict[str, dict] = {}
+    for envelope in all_envelopes(handoff):
+        issued = str(envelope.get("issued_at") or "")
+        if not issued.startswith(day):
+            continue
+        card = str(envelope.get("card") or "?")
+        entry = totals.setdefault(card, {"card": card, "tokens": 0, "knocks": 0, "budget": 0})
+        tokens = (envelope.get("history") or {}).get("tokens")
+        if isinstance(tokens, int):
+            entry["tokens"] += tokens
+            entry["knocks"] += 1
+        budget = envelope.get("budget_tokens")
+        if isinstance(budget, int):
+            entry["budget"] += budget
+    return sorted(totals.values(), key=lambda item: (-item["tokens"], item["card"]))
+
+
 def cmd_budget(args) -> int:
     handoff = Path(args.handoff)
     used = today_tokens(handoff)
     limit = args.daily_tokens
-    payload = {**used, "limit": limit, "ok": used["tokens"] <= limit}
+    per_card = card_tokens(handoff)
+    payload = {**used, "limit": limit, "ok": used["tokens"] <= limit, "per_card": per_card}
     if args.json:
         out(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         out(f"今日（{used['day']}）已用 {used['tokens']:,} tokens / 上限 {limit:,}（{used['knocks']} 次敲门）"
             + ("—— 可以继续派活。" if payload["ok"] else "—— 已超限，暂停派活（R10）。"))
+        if per_card:
+            out("按卡汇总：")
+            for entry in per_card:
+                cap = f" / 卡预算 {entry['budget']:,}" if entry["budget"] else ""
+                out(f"  {entry['card']}: {entry['tokens']:,} tokens（{entry['knocks']} 次）{cap}")
     return 0 if payload["ok"] else 3
 
 
@@ -1013,9 +1437,11 @@ def fail(code: str, message: str) -> int:
 # --------------------------------------------------------------------------- #
 def selftest() -> int:
     failures = 0
+    total = 0
 
     def check(title: str, condition: bool, detail: str = "") -> None:
-        nonlocal failures
+        nonlocal failures, total
+        total += 1
         if not condition:
             failures += 1
         print(f"  {'ok  ' if condition else 'FAIL'} {title}" + (f"  {detail}" if detail and not condition else ""))
@@ -1040,6 +1466,9 @@ def selftest() -> int:
             encoding="utf-8")
         check("信封往返", (load_envelope(handoff, "knock_010101_001") or {}).get("card") == "X1")
         check("今日 token 汇总", today_tokens(handoff)["tokens"] == 1000, str(today_tokens(handoff)))
+        check("按卡汇总：单卡单次",
+              [item["card"] for item in card_tokens(handoff)] == ["X1"]
+              and card_tokens(handoff)[0]["tokens"] == 1000, str(card_tokens(handoff)))
         check("账目查询", (last_verdict(handoff, "knock_010101_001") or {}).get("status") == "PASS")
         facts = {"block": "### X1 自测\n- 负责人：W\n- 验收判据：①甲\n", "criteria_sha256": "0" * 64}
         brief = write_brief(handoff, "knock_010101_002", "X1", facts, board)
@@ -1143,7 +1572,93 @@ def selftest() -> int:
               and git(["rev-parse", "HEAD"], cwd=repo)[1].strip() != moved, text[:120])
         check("落地：摘取后分支未并入 ⇒ 计划变 noop 之外的正确态",
               land_plan(repo, repo, base, "card/X10")[0] in ("noop", "cherry-pick"))
-    print(f"SELFTEST {'OK' if not failures else 'FAILED'}: {26 - failures}/26")
+
+    # ---- R52：排队决策 / 通道自检 / 停机清单 / 换绑（纯函数与临时目录，不碰真实环境）----
+    queued = {"knock_id": "knock_020202_001", "card": "X9", "target_session": "cron-exec-w1",
+              "delivery": DELIVERY_PENDING, "queue_deadline": queue_deadline(DEFAULT_QUEUE_TIMEOUT),
+              "issued_at": stamp(), "history": {"tokens": 700}, "budget_tokens": 5000,
+              "prompt": "跑 X9", "timeout_seconds": 300, "max_retries": 2,
+              "task_template": {"id": "knock_020202_001", "title": "[敲] X9", "schedule": "in 1m",
+                                "targetSessionId": "cron-exec-w1", "permissionPreset": "workspace-write",
+                                "overlapPolicy": "skip"}}
+    check("排队：目标在跑 ⇒ 等", delivery_decision(queued, ["cron-exec-w1"], []) == ("wait", "target_running"),
+          str(delivery_decision(queued, ["cron-exec-w1"], [])))
+    check("排队：目标空闲 ⇒ 投", delivery_decision(queued, [], []) == ("deliver", "target_idle"),
+          str(delivery_decision(queued, [], [])))
+    check("排队：目标已归档 ⇒ 放弃",
+          delivery_decision(queued, [], ["cron-exec-w1"]) == ("abandon", "archived_target"),
+          str(delivery_decision(queued, [], ["cron-exec-w1"])))
+    check("排队：超期 ⇒ 放弃（原因 queue_timeout）",
+          delivery_decision(dict(queued, queue_deadline="2020-01-01T00:00:00+08:00"), [], []) == ("abandon", "queue_timeout"),
+          str(delivery_decision(dict(queued, queue_deadline="2020-01-01T00:00:00+08:00"), [], [])))
+    check("排队：deadline 不是合法时间 ⇒ 不误判超期",
+          delivery_decision(dict(queued, queue_deadline="???"), [], [])[0] == "deliver",
+          str(delivery_decision(dict(queued, queue_deadline="???"), [], [])))
+    check("排队：只挑 delivery=pending（老信封视为已投）",
+          [item["knock_id"] for item in pending_envelopes([queued, {"knock_id": "old"}])] == ["knock_020202_001"])
+    rebuilt = task_from_envelope(queued)
+    check("排队：任务体重建带超时/重试/提示词",
+          rebuilt["timeoutSeconds"] == 300 and rebuilt["maxRetries"] == 2 and rebuilt["prompt"] == "跑 X9"
+          and rebuilt["targetSessionId"] == "cron-exec-w1", str(rebuilt))
+    check("排队：老信封没有超时字段 ⇒ 落到默认 900",
+          task_from_envelope({"knock_id": "k", "target_session": "s"})["timeoutSeconds"] == DEFAULT_TASK_TIMEOUT)
+
+    check("通道：补丁在位 ⇒ OK", patch_state("    resumeSessionId: prep.targetSessionId,")["state"] == "OK")
+    check("通道：补丁不在 ⇒ 注意", patch_state("    sessionId: prep.targetSessionId,")["state"] == "注意")
+    check("通道：新旧键名并存 ⇒ 注意（可能重复投递）",
+          patch_state("resumeSessionId: prep.targetSessionId,\n    sessionId: prep.targetSessionId,")["state"] == "注意")
+    check("通道：登记健康点名归档", binding_problems({"W": "w1", "P": "p1"}, ["w1", "p1"], ["p1"]) == ["P 已被归档"],
+          str(binding_problems({"W": "w1", "P": "p1"}, ["w1", "p1"], ["p1"])))
+    check("通道：登记健康点名不在名册", binding_problems({"W": "w9"}, ["w1"], []) == ["W 不在会话名册里"],
+          str(binding_problems({"W": "w9"}, ["w1"], [])))
+    check("通道：健康登记不报问题", binding_problems({"W": "w1", "A": "a1"}, ["w1"], []) == [])
+
+    sample = [{"id": "knock_020202_001", "title": "敲"}, {"id": "rotate_020202_001", "title": "轮转"},
+              {"id": "worker_boot", "title": "起工人"}, {"id": "patrol", "title": "巡检"},
+              {"id": "cron_owner_1", "title": "业主排期"}]
+    doomed, kept = stopper_selection(sample)
+    check("停机：只删控制台铸的，保留巡检与业主排期",
+          [item["id"] for item in doomed] == ["knock_020202_001", "rotate_020202_001", "worker_boot"]
+          and [item["id"] for item in kept] == ["patrol", "cron_owner_1"], str([item["id"] for item in doomed]))
+    check("停机：keep 加前缀即保留",
+          [item["id"] for item in stopper_selection(sample, ("patrol", "rotate_"))[1]]
+          == ["rotate_020202_001", "patrol", "cron_owner_1"],
+          str([item["id"] for item in stopper_selection(sample, ("patrol", "rotate_"))[1]]))
+
+    with tempfile.TemporaryDirectory() as tmp3:
+        store = Path(tmp3) / "sessions"
+        (store / "--E-a--" / "cron-exec-w1").mkdir(parents=True)
+        (store / "--E-a--" / "cron-exec-patrol-2026-10-15").mkdir(parents=True)
+        found = session_store_ids(store)
+        check("名册：会话存贮按 cwd 桶枚举", "cron-exec-w1" in found, str(found))
+        check("名册：每日重置变体折回基名", "cron-exec-patrol" in found, str(found))
+        check("名册：存贮不存在 ⇒ 空且不抛", session_store_ids(Path(tmp3) / "nope") == [])
+
+    with tempfile.TemporaryDirectory() as tmp2:
+        bind_dir = Path(tmp2)
+        (bind_dir / "cards").mkdir()
+        (bind_dir / "outbox").mkdir()
+        (bind_dir / "board.skeleton.md").write_text(
+            "# 看板骨架\n\n## 常驻 worker\n\n| 代号 | 会话 ID |\n| --- | --- |\n"
+            "| A | `session-aaaa` |\n| W | `cron-exec-w1` |\n", encoding="utf-8", newline="\n")
+        code, message = bind_worker(bind_dir, "W", "cron-exec-w2", roster=["cron-exec-w1", "cron-exec-w2"],
+                                    archived=[], apply=False)
+        check("换绑：干跑只说不写",
+              code == 0 and "cron-exec-w2" in message
+              and "cron-exec-w2" not in (bind_dir / "board.skeleton.md").read_text(encoding="utf-8"), message)
+        check("换绑：不在名册 ⇒ 拒绝",
+              bind_worker(bind_dir, "W", "cron-exec-nope", roster=["cron-exec-w1"], archived=[])[0] == 2)
+        check("换绑：已归档 ⇒ 拒绝",
+              bind_worker(bind_dir, "W", "cron-exec-w2", roster=["cron-exec-w2"], archived=["cron-exec-w2"])[0] == 2)
+        check("换绑：代号不在 worker 表 ⇒ 拒绝",
+              bind_worker(bind_dir, "Z", "cron-exec-w2", roster=["cron-exec-w2"], archived=[])[0] == 2)
+        code, message = bind_worker(bind_dir, "W", "cron-exec-w2", roster=["cron-exec-w2"], archived=[])
+        rendered = (bind_dir / "board.skeleton.md").read_text(encoding="utf-8")
+        check("换绑：真换 ⇒ 骨架改写 + 记轮换账",
+              code == 0 and "cron-exec-w2" in rendered and (bind_dir / "ledger" / "rotations.jsonl").is_file(),
+              message)
+
+    print(f"SELFTEST {'OK' if not failures else 'FAILED'}: {total - failures}/{total}")
     return 0 if not failures else 1
 
 
@@ -1166,7 +1681,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--branch", help="工作树分支名（默认 card/<卡>）")
     p.add_argument("--workset", help="工作集（逗号分隔的路径前缀，覆盖卡上的 workset）")
     p.add_argument("--wait", action="store_true", help="同步等它跑完（默认不等）")
-    p.add_argument("--timeout", type=float, default=900.0)
+    p.add_argument("--timeout", type=int, default=DEFAULT_TASK_TIMEOUT,
+                   help=f"任务体 timeoutSeconds：到点中止（默认 {DEFAULT_TASK_TIMEOUT}，这是唯一的停止手段）")
+    p.add_argument("--max-retries", type=int, default=0, help="任务体 maxRetries（默认 0：不重试）")
+    p.add_argument("--when-idle", action="store_true",
+                   help="R52-1：目标在跑时不报错，只写信封排队（delivery=pending），由 collect 择机投递")
+    p.add_argument("--queue-timeout", type=int, default=DEFAULT_QUEUE_TIMEOUT,
+                   help=f"排队超期秒数（默认 {DEFAULT_QUEUE_TIMEOUT}）；超期记 abandoned 并留痕")
+    p.add_argument("--budget-tokens", type=int, help="本卡预算（写进信封，供按卡汇总与预算闸）")
     p.add_argument("--force", action="store_true"); p.add_argument("--dry-run", action="store_true")
 
     p = sub.add_parser("rotate", help="R9：换掉某个常驻工人的会话（只换身份，不换职责）")
@@ -1179,9 +1701,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--timeout", type=float, default=300.0)
     p.add_argument("--dry-run", action="store_true")
 
-    p = sub.add_parser("collect", help="刷新并列出敲门的执行事实")
+    p = sub.add_parser("collect", help="刷新并列出敲门的执行事实（顺带投递排队信封）")
     p.add_argument("--knock"); p.add_argument("--card")
     p.add_argument("--verify", action="store_true"); p.add_argument("--no-write", action="store_true")
+    p.add_argument("--no-deliver", action="store_true", help="只读，不投递排队中的信封")
     p.add_argument("--operator", default="A")
 
     p = sub.add_parser("verify", help="独立复核并按 R14 记账")
@@ -1219,6 +1742,18 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("card"); p.add_argument("--by", default="A"); p.add_argument("--note")
     p.add_argument("--release", action="store_true"); p.add_argument("--force", action="store_true")
 
+    p = sub.add_parser("workers", help="R52-2：列出候选会话（名册 ∩ 未归档）与当前登记")
+    p.add_argument("--limit", type=int, default=20)
+
+    p = sub.add_parser("bind", help="R52-2：登记/换绑某代号的工人会话（写骨架 + 重渲染 + 记轮换账）")
+    p.add_argument("worker"); p.add_argument("--session", required=True)
+    p.add_argument("--by", default="A"); p.add_argument("--reason")
+    p.add_argument("--dry-run", action="store_true")
+
+    p = sub.add_parser("stop-all", help="R52-3：删掉非人类定时任务（不中断已启动的那一轮）")
+    p.add_argument("--keep", help=f"要保留的 id 前缀（逗号分隔；默认 {'/'.join(KEEP_BY_DEFAULT)}）")
+    p.add_argument("--dry-run", action="store_true")
+
     sub.add_parser("selftest")
     args = parser.parse_args(argv)
     if args.command == "selftest":
@@ -1227,6 +1762,7 @@ def main(argv: list[str] | None = None) -> int:
         "dispatch": cmd_dispatch, "collect": cmd_collect, "verify": cmd_verify,
         "close": cmd_close, "status": cmd_status, "budget": cmd_budget, "lease": cmd_lease,
         "rotate": cmd_rotate, "land": cmd_land,
+        "workers": cmd_workers, "bind": cmd_bind, "stop-all": cmd_stop_all,
     }[args.command]
     return handler(args)
 
