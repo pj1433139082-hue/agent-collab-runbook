@@ -1019,20 +1019,20 @@ def selftest() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         handoff = Path(tmp)
         (handoff / "outbox").mkdir()
-        envelope = {"knock_id": "<id>", "card": "X1", "issued_at": stamp(),
+        envelope = {"knock_id": "knock_010101_001", "card": "X1", "issued_at": stamp(),
                     "history": {"tokens": 1000, "lastStatus": "success"}}
         write_envelope(handoff, envelope)
         (handoff / "ledger").mkdir()
         (handoff / "ledger" / "verdicts.jsonl").write_text(
-            json.dumps({"knock_id": "<id>", "status": "PASS"}, ensure_ascii=False) + "\n",
+            json.dumps({"knock_id": "knock_010101_001", "status": "PASS"}, ensure_ascii=False) + "\n",
             encoding="utf-8")
-        check("信封往返", (load_envelope(handoff, "<id>") or {}).get("card") == "X1")
+        check("信封往返", (load_envelope(handoff, "knock_010101_001") or {}).get("card") == "X1")
         check("今日 token 汇总", today_tokens(handoff)["tokens"] == 1000, str(today_tokens(handoff)))
-        check("账目查询", (last_verdict(handoff, "<id>") or {}).get("status") == "PASS")
+        check("账目查询", (last_verdict(handoff, "knock_010101_001") or {}).get("status") == "PASS")
         facts = {"block": "### X1 自测\n- 负责人：W\n- 验收判据：①甲\n", "criteria_sha256": "0" * 64}
-        brief = write_brief(handoff, "<id>", "X1", facts, board)
+        brief = write_brief(handoff, "knock_010101_002", "X1", facts, board)
         text = brief.read_text(encoding="utf-8")
-        check("brief 含 KNOCK 与判据", "KNOCK: <id>" in text and "①甲" in text)
+        check("brief 含 KNOCK 与判据", "KNOCK: knock_010101_002" in text and "①甲" in text)
         lease = argparse.Namespace(handoff=str(handoff), card="X1", release=False, force=False, by="A", note="")
         check("占用声明", cmd_lease(lease) == 0 and read_lease(handoff, "X1") is not None)
         check("重复占用被拒", cmd_lease(lease) == 2)
@@ -1063,16 +1063,16 @@ def selftest() -> int:
 
         # R11-4：DEGRADED 未接受时必须拦住
         (handoff / "ledger" / "verdicts.jsonl").write_text(
-            json.dumps({"knock_id": "<id>", "card": "X2", "status": "DEGRADED"},
+            json.dumps({"knock_id": "knock_010101_003", "card": "X2", "status": "DEGRADED"},
                        ensure_ascii=False) + "\n", encoding="utf-8")
-        write_envelope(handoff, {"knock_id": "<id>", "card": "X2", "issued_at": stamp()})
-        check("账目：取到 DEGRADED", (last_verdict(handoff, "<id>") or {}).get("status") == "DEGRADED")
+        write_envelope(handoff, {"knock_id": "knock_010101_003", "card": "X2", "issued_at": stamp()})
+        check("账目：取到 DEGRADED", (last_verdict(handoff, "knock_010101_003") or {}).get("status") == "DEGRADED")
         # 收口过的敲门不该继续显示成「等回执」（2026-10-16 实测：close 之后 status 仍在催）
-        write_envelope(handoff, {"knock_id": "<id>", "card": "X2", "issued_at": stamp(),
+        write_envelope(handoff, {"knock_id": "knock_010101_004", "card": "X2", "issued_at": stamp(),
                                  "closed_at": stamp()})
         waiting_ids = [item.get("knock_id") for item in awaiting_receipts(handoff, all_envelopes(handoff))]
         check("等回执：已收口的不算在等",
-              "<id>" not in waiting_ids and "<id>" in waiting_ids, str(waiting_ids))
+              "knock_010101_004" not in waiting_ids and "knock_010101_003" in waiting_ids, str(waiting_ids))
 
     # R18 第二阶段：落地计划（ff / cherry-pick / noop / 拒绝）——用真 git 仓库，别用假的判据
     # 真实拓扑：repo 是主检出（main），卡分支活在另一个目录的工作树里；落地＝把分支并回主检出。

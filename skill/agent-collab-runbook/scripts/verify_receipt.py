@@ -12,8 +12,8 @@
   FAIL      物证与现实矛盾、判据自报未通过、有残留、或散文与结构化块冲突
 
 用法：
-    python verify_receipt.py --card W5 --knock <id>
-    python verify_receipt.py --card W5 --knock <id> --json
+    python verify_receipt.py --card W5 --knock <敲门 id>
+    python verify_receipt.py --card W5 --knock <敲门 id> --json
     python verify_receipt.py --selftest
 """
 
@@ -558,20 +558,20 @@ def selftest() -> int:
             encoding="utf-8",
         )
         schema = Path(__file__).resolve().parents[1] / "references" / "receipt.schema.json"
-        envelope_path = outbox / "<id>.history.json"
+        envelope_path = outbox / "knock_000000_001.history.json"
         md_path = outbox / "T1-receipt.md"
-        json_path = outbox / "<id>.receipt.json"
+        json_path = outbox / "knock_000000_001.receipt.json"
 
         def build(sha=probe_sha, status="OK", md_status="OK", envelope_hash=sha256_text(criteria), evidence2=None, evidence1=None):
             envelope_path.write_text(json.dumps({
-                "knock_id": "<id>", "card": "T1",
+                "knock_id": "knock_000000_001", "card": "T1",
                 "criteria_sha256": envelope_hash, "target_session": "session-selftest",
-                "issued_at": "<时间>",
+                "issued_at": "2026-10-15T19:00:00+08:00",
             }, ensure_ascii=False), encoding="utf-8")
-            md_path.write_text(f"# T1 回执\n\nKNOCK: <id>\nSTATUS: {md_status}\n\n散文部分。\n", encoding="utf-8")
+            md_path.write_text(f"# T1 回执\n\nKNOCK: knock_000000_001\nSTATUS: {md_status}\n\n散文部分。\n", encoding="utf-8")
             default1 = [{"kind": "file", "path": str(probe), "sha256": sha, "size": probe_size}]
             json_path.write_text(json.dumps({
-                "schema_version": "1.0", "knock_id": "<id>", "card": "T1", "round": 1,
+                "schema_version": "1.0", "knock_id": "knock_000000_001", "card": "T1", "round": 1,
                 "session": "session-selftest", "status": status,
                 "criteria": [
                     {"id": 1, "verdict": "pass", "evidence": evidence1 or default1},
@@ -582,7 +582,7 @@ def selftest() -> int:
             }, ensure_ascii=False), encoding="utf-8")
 
         def run() -> Report:
-            return assess(card="T1", knock="<id>", board_path=board, outbox=outbox,
+            return assess(card="T1", knock="knock_000000_001", board_path=board, outbox=outbox,
                           receipt_md=md_path, receipt_json=json_path, schema_path=schema)
 
         inline_ok = {"kind": "inline", "content": "PROBE\n", "sha256": hashlib.sha256(b"PROBE\n").hexdigest(), "size": 6}
@@ -620,7 +620,7 @@ def selftest() -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="回执复核器（三态：PASS / FAIL / DEGRADED）")
     parser.add_argument("--card", help="卡号，如 W5")
-    parser.add_argument("--knock", help="敲门 id，如 <id>")
+    parser.add_argument("--knock", help="敲门 id，如 <敲门 id>")
     parser.add_argument("--handoff", type=Path, default=DEFAULT_HANDOFF, help="交接区目录（默认 %%COLLAB_HANDOFF%% 或 _handoff）")
     parser.add_argument("--board", type=Path, help="看板路径（默认 <handoff>\\BOARD.md）")
     parser.add_argument("--outbox", type=Path, help="回执目录（默认 <handoff>\\outbox）")

@@ -23,7 +23,7 @@
 
 ```json
 {
-  "knock_id": "<id>",
+  "knock_id": "<敲门 id>",
   "card": "W6",
   "target_session": "cron-exec-worker_boot-...",
   "issued_at": "<时间>",
@@ -47,7 +47,7 @@
 必须含两行（复核器按行解析）：
 
 ```text
-KNOCK: <id>
+KNOCK: <敲门 id>
 STATUS: OK
 ```
 
@@ -60,7 +60,7 @@ STATUS: OK
 ```json
 {
   "schema_version": "1.0",
-  "knock_id": "<id>",
+  "knock_id": "<敲门 id>",
   "card": "W6",
   "round": 1,
   "session": "cron-exec-worker_boot-...",
@@ -105,8 +105,8 @@ STATUS: OK
 
 ```powershell
 $py = "<业务仓库>\.venv-311\Scripts\python.exe"
-& $py "<技能目录>\scripts\verify_receipt.py" --card W6 --knock <id>
-& $py "<技能目录>\scripts\verify_receipt.py" --card W6 --knock <id> --json   # 机器可读
+& $py "<技能目录>\scripts\verify_receipt.py" --card W6 --knock <敲门 id>
+& $py "<技能目录>\scripts\verify_receipt.py" --card W6 --knock <敲门 id> --json   # 机器可读
 & $py "<技能目录>\scripts\verify_receipt.py" --selftest                                 # 7 例回归
 ```
 
@@ -131,12 +131,12 @@ $py = "<业务仓库>\.venv-311\Scripts\python.exe"
 
 | 卡 | 命令 | 结论 | 说明 |
 | --- | --- | --- | --- |
-| W1 | `--card W1 --knock <id>` | **PASS** | 证据模型订正后三条判据全部 `verified` |
-| W2 | `--card W2 --knock <id>` | **PASS** | 同上 |
-| W3 | `--card W3 --knock <id>` | **FAIL** | 判据①②③ 自报未通过 ⇒ 如实 FAIL；价值在机制定位，修复由 W4 实证 |
-| W4 | `--card W4 --knock <id>` | **DEGRADED** | 判据②（no-op 追加）不可事后复算 ⇒ T2 |
-| W5 | `--card W5 --knock <id>` | **DEGRADED** | 判据⑥（目录列表替代口径）是自报 ⇒ T2 |
-| W6 | `--card W6 --knock <id>` | **PASS** | 信封补上后从 DEGRADED 变 PASS，三态区分生效 |
+| W1 | `--card W1 --knock <敲门 id>` | **PASS** | 证据模型订正后三条判据全部 `verified` |
+| W2 | `--card W2 --knock <敲门 id>` | **PASS** | 同上 |
+| W3 | `--card W3 --knock <敲门 id>` | **FAIL** | 判据①②③ 自报未通过 ⇒ 如实 FAIL；价值在机制定位，修复由 W4 实证 |
+| W4 | `--card W4 --knock <敲门 id>` | **DEGRADED** | 判据②（no-op 追加）不可事后复算 ⇒ T2 |
+| W5 | `--card W5 --knock <敲门 id>` | **DEGRADED** | 判据⑥（目录列表替代口径）是自报 ⇒ T2 |
+| W6 | `--card W6 --knock <敲门 id>` | **PASS** | 信封补上后从 DEGRADED 变 PASS，三态区分生效 |
 
 六卡均 `residue=[]`、`reasons=[]`、无判据漂移；复核器 `--selftest` 7/7。
 
@@ -144,8 +144,8 @@ $py = "<业务仓库>\.venv-311\Scripts\python.exe"
 
 | 卡 | 敲门 | 结论 | 说明 |
 | --- | --- | --- | --- |
-| X1 | `<id>` | **PASS** | 全流程走控制台（异步派活 + 回执 + 复核 + 记账 + 收口），判据①② 全部独立复算 |
-| X2 | `<id>` | **DEGRADED**（已受理降级） | 判据① 按文件字节复算通过；判据②③ 物证是 git 命令（仅自报）；收口时由发起方独立跑了工作树审计（diff 只有 `A probe.md`、`status` 干净、越界 0），并把理由写进卡 |
+| X1 | `<敲门 id>` | **PASS** | 全流程走控制台（异步派活 + 回执 + 复核 + 记账 + 收口），判据①② 全部独立复算 |
+| X2 | `<敲门 id>` | **DEGRADED**（已受理降级） | 判据① 按文件字节复算通过；判据②③ 物证是 git 命令（仅自报）；收口时由发起方独立跑了工作树审计（diff 只有 `A probe.md`、`status` 干净、越界 0），并把理由写进卡 |
 
 X2 是一次真实的「改造后能力验收」：它同时验了三件事——**会话轮转**（W 换到新会话仍被敲门唤醒）、**一卡一工作树**（任务 cwd 指向 `_worktrees\X2-011454`，主检出不动）、**工作集声明**（声明 `probe.md`，收口核对越界 0 项）。它也是这套东西第一次**先失败后修好**：第一版工作树落在 `%TEMP%`（沙箱可写根之外），工人写不进去、申请提权、无人批准 → 挂到超时；改到 `_worktrees\` 并加派发前落点守卫后，同样的卡一次跑通。
 
@@ -179,13 +179,13 @@ X2 是一次真实的「改造后能力验收」：它同时验了三件事—�
 复核结论由**发起方**记账：`verify_receipt.py` 默认把一条 JSON 追加进 `_handoff\ledger\verdicts.jsonl`（**进 git**，只增不改；状态仍在 `cards/*.yaml`，账本不是状态源）。一条记录长这样：
 
 ```json
-{"at":"<时间>","operator":"A","card":"X1","knock_id":"<id>",
+{"at":"<时间>","operator":"A","card":"X1","knock_id":"<敲门 id>",
  "status":"PASS","exit_code":0,"reasons":[],
  "criteria":[{"id":1,"verdict":"pass","level":"verified"},{"id":2,"verdict":"pass","level":"verified"}],
  "residue":[],
  "criteria_sha256":"dcb1e479…","board_sha256":"933d9132…",
  "receipts":[{"path":"X1-receipt.md","sha256":"3b59b4ab…","size":3377},
-             {"path":"<id>.receipt.json","sha256":"a6920380…","size":1286}]}
+             {"path":"<敲门 id>.receipt.json","sha256":"a6920380…","size":1286}]}
 ```
 
 三个哈希各钉一头：`criteria_sha256` 钉「被复核的是哪一版判据」，`board_sha256` 钉当时的卡面，`receipts[].sha256` 钉被复核的两件套——合起来让这条结论**可被事后证伪**：重算不一致，就说明卡面/判据/回执在结论之后变过。

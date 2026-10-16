@@ -64,7 +64,7 @@ pwsh -File <交接区>\knock.ps1 -Card <卡号> -DeleteTask -TaskId <knock_id>
 - **判据会被固化**：发出时把卡片判据文本的 sha256 写进信封（`outbox\<knock_id>.history.json`）；回执前若改过判据，复核器判 DEGRADED（判据漂移）。
 - **回执要自己拉**：投递单向，不通知发起方；投完自己要回去确认结果。
 
-端到端实测（2026-10-15）：`<id>` → 工人交回执两件套 → 复核器给出 **PASS（exit 0）**，两条判据都被独立复算（内容哈希 + 缺失复查）。细节见 `references/session-scheduling.md` 与 `references/receipt-contract.md`。
+端到端实测（2026-10-15）：`<敲门 id>` → 工人交回执两件套 → 复核器给出 **PASS（exit 0）**，两条判据都被独立复算（内容哈希 + 缺失复查）。细节见 `references/session-scheduling.md` 与 `references/receipt-contract.md`。
 
 ### 端到端实测（本机，2026-10-15）
 
