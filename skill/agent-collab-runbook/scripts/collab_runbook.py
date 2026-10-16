@@ -103,7 +103,7 @@ def fail(code: str, message: str) -> int:
 # 另注：**不拿“目标目录不存在”当缺陷**——include 白名单（如 codex）本就不收新技能；
 # 这类目标报 `skipped` 且不计入返码，只报「期望存在却缺席」的。
 # --------------------------------------------------------------------------- #
-DEFAULT_SKILL_ROOT = Path(r"<技能源>\skill")
+DEFAULT_SKILL_ROOT = Path(r".\agent-collab-runbook\skill")
 DEFAULT_SKILL_NAME = "agent-collab-runbook"
 
 # 读不到 skillshare 配置时的回落清单（保持向后兼容）。

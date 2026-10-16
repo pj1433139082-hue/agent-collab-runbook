@@ -287,7 +287,7 @@ def worktree_root() -> Path:
 
 
 def sandbox_roots() -> tuple[Path, ...]:
-    raw = os.environ.get("COLLAB_SANDBOX_ROOTS", r"<工作根>")
+    raw = os.environ.get("COLLAB_SANDBOX_ROOTS", r".")
     return tuple(Path(item) for item in raw.split(os.pathsep) if item.strip())
 
 
@@ -1158,7 +1158,7 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("rotate", help="R9：换掉某个常驻工人的会话（只换身份，不换职责）")
     p.add_argument("worker", help="代号，如 W / P")
     p.add_argument("--old-session", help="显式指定旧会话 id（默认从看板 worker 表读）")
-    p.add_argument("--cwd", default=r"<工作根>")
+    p.add_argument("--cwd", default=r".")
     p.add_argument("--permission", default="workspace-write")
     p.add_argument("--provider", default=DEFAULT_PROVIDER); p.add_argument("--model", default=DEFAULT_MODEL)
     p.add_argument("--by", default="A"); p.add_argument("--reason")
