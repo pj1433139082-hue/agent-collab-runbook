@@ -431,10 +431,12 @@ ROLE_LABELS = {"W": "常驻工人", "P": "巡检", "A": "主会话", "B": "并�
 
 
 def role_title(code: object, fallback: str = "看板任务") -> str:
-    """任务标题＝会话名的来源（dsh-cron 补丁按 '[' 开头的标题给目标会话命名）。
+    """任务标题＝会话名的来源（同一个角色永远同一个标题）。
 
-    同一角色永远用同一个标题：宿主的命名是「每会话每宿主生命周期只写一次」，
-    标题随卡变会把好名字换成上一张卡的名字。
+    dsh-cron 0.3.8 起用任务字段 `sessionTitle` 显式命名目标会话；`[` 开头的
+    `title` 只是旧版回落（且只在新建会话时生效，续会话不覆盖）。因此载荷里
+    必须**同时**给 `title` 与 `sessionTitle`，否则续会话拿不到名字。
+    标题随卡变会把好名字换成上一张卡的名字，所以只按角色取，不按卡取。
     """
     code = str(code or "").strip().upper() or "?"
     return f"[{code}] {ROLE_LABELS.get(code, fallback)}"
@@ -446,6 +448,8 @@ def task_from_envelope(envelope: dict) -> dict:
     task = dict(template) if isinstance(template, dict) else {}
     task.setdefault("id", envelope.get("knock_id"))
     task.setdefault("title", role_title(envelope.get("owner_code")))
+    # dsh-cron 0.3.8：显式标题字段；续会话也生效（`[` 标题只在新会话生效）。
+    task.setdefault("sessionTitle", task["title"])
     task.setdefault("schedule", envelope.get("schedule") or "in 1m")
     task.setdefault("targetSessionId", envelope.get("target_session"))
     task.setdefault("overlapPolicy", "skip")
@@ -632,6 +636,7 @@ def cmd_rotate(args) -> int:
     task = {
         "id": boot,
         "title": role_title(args.worker, "常驻工人"),
+        "sessionTitle": role_title(args.worker, "常驻工人"),
         "schedule": "in 1m",
         "prompt": BOOT_PROMPT,
         "cwd": args.cwd,
@@ -765,6 +770,7 @@ def cmd_dispatch(args) -> int:
     task = {
         "id": knock,
         "title": role_title(owner_code),
+        "sessionTitle": role_title(owner_code),
         "schedule": args.schedule,
         "prompt": prompt,
         "targetSessionId": target,
@@ -1621,6 +1627,11 @@ def selftest() -> int:
     check("命名：老信封没有标题 ⇒ 用角色标题兜底（同角色永远同名）",
           task_from_envelope({"knock_id": "k", "target_session": "s",
                               "owner_code": "W"})["title"] == "[W] 常驻工人")
+    check("命名：任务体带显式 sessionTitle（dsh-cron 0.3.8 按字段命名，续会话也生效）",
+          task_from_envelope({"knock_id": "k", "target_session": "s",
+                              "owner_code": "W"})["sessionTitle"] == "[W] 常驻工人"
+          and task_from_envelope({"knock_id": "k", "target_session": "s",
+                                  "owner_code": "P"})["sessionTitle"] == "[P] 巡检")
 
     check("通道：补丁在位 ⇒ OK", patch_state("    resumeSessionId: prep.targetSessionId,")["state"] == "OK")
     check("通道：补丁不在 ⇒ 注意", patch_state("    sessionId: prep.targetSessionId,")["state"] == "注意")
